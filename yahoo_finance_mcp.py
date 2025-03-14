@@ -14,43 +14,15 @@ import re
 import logging
 from typing import Dict, Any, List, Optional, Union
 
-# Configure logging with more detailed format
+# Configure logging to only show CRITICAL level logs
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.CRITICAL,  # Only show CRITICAL logs
+    format='%(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('yahoo_finance_mcp.log')
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
-
-def log_api_request(method: str, url: str, headers: Dict[str, str] = None, params: Dict[str, Any] = None) -> None:
-    """Log API request details."""
-    logger.info(f"\nAPI Request:")
-    logger.info(f"Method: {method}")
-    logger.info(f"URL: {url}")
-    if headers:
-        logger.info(f"Headers: {json.dumps(headers, indent=2)}")
-    if params:
-        logger.info(f"Params: {json.dumps(params, indent=2)}")
-
-def log_api_response(response: requests.Response, error: Exception = None) -> None:
-    """Log API response details."""
-    logger.info(f"\nAPI Response:")
-    if error:
-        logger.error(f"Error: {str(error)}")
-        return
-    
-    logger.info(f"Status Code: {response.status_code}")
-    try:
-        if response.headers.get('content-type', '').startswith('application/json'):
-            logger.info(f"Response JSON: {json.dumps(response.json(), indent=2)}")
-        else:
-            logger.info(f"Response Text: {response.text[:500]}...")  # First 500 chars
-    except Exception as e:
-        logger.error(f"Error parsing response: {str(e)}")
-    logger.info(f"Response Headers: {json.dumps(dict(response.headers), indent=2)}")
 
 class YahooFinanceMCP:
     """
@@ -240,134 +212,67 @@ class YahooFinanceMCP:
         }
     
     def execute_function(self, function_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute a Yahoo Finance function based on the function name and parameters.
-        
-        Args:
-            function_name: The function to execute
-            parameters: The parameters for the function
-            
-        Returns:
-            The result of the function
-        """
-        logger.info(f"Executing function: {function_name} with parameters: {parameters}")
-        
+        """Execute a function with the given parameters."""
         try:
-            if function_name == "get_stock_price":
-                return self.get_stock_price(parameters.get("symbol"))
+            # Get the function from this class
+            func = getattr(self, function_name)
             
-            elif function_name == "get_multiple_stock_prices":
-                symbols = parameters.get("symbols", [])
-                return self.get_multiple_stock_prices(symbols)
+            # Execute the function with parameters
+            return func(**parameters)
             
-            elif function_name == "get_stock_info":
-                return self.get_stock_info(parameters.get("symbol"))
-                
-            elif function_name == "get_stock_field":
-                return self.get_stock_field(parameters.get("symbol"), parameters.get("field"))
-                
-            elif function_name == "get_multiple_stock_fields":
-                return self.get_multiple_stock_fields(parameters.get("symbol"), parameters.get("fields", []))
-            
-            elif function_name == "get_stock_history":
-                # Check if we have start_date and end_date for absolute periods
-                if "start_date" in parameters and "end_date" in parameters:
-                    return self.get_stock_history_range(
-                        parameters.get("symbol"),
-                        parameters.get("start_date"),
-                        parameters.get("end_date")
-                    )
-                else:
-                    return self.get_stock_history(
-                        parameters.get("symbol"),
-                        parameters.get("period", "1mo")
-                    )
-            
-            elif function_name == "get_market_news":
-                symbol = parameters.get("symbol")
-                limit = parameters.get("limit", 5)
-                return self.get_market_news(symbol, limit)
-            
-            else:
-                return {"error": f"Unknown function: {function_name}"}
-                
         except Exception as e:
-            logger.error(f"Error executing {function_name}: {str(e)}")
-            return {"error": f"Error: {str(e)}"}
-    
-    def _get_cached_or_fetch(self, key: str, fetch_func, ttl: int) -> Any:
-        """
-        Get data from cache or fetch it if not available or expired.
+            logger.critical(f"Error executing {function_name}: {str(e)}")
+            return {"error": str(e)}
+
+    def _get_cached_or_fetch(self, key: str, fetch_func: callable, ttl: int) -> Dict[str, Any]:
+        """Get data from cache or fetch if not present/expired."""
+        now = time.time()
         
-        Args:
-            key: Cache key
-            fetch_func: Function to fetch the data if not in cache
-            ttl: Time to live for cache entry in seconds
+        # Check cache
+        if key in self.cache and now - self.cache_expiry[key] < ttl:
+            return self.cache[key]
             
-        Returns:
-            The cached or freshly fetched data
-        """
-        current_time = time.time()
-        
-        # Check if we have it in cache and if it's still valid
-        if key in self.cache and key in self.cache_expiry:
-            if current_time < self.cache_expiry[key]:
-                logger.info(f"Cache hit for {key}")
-                return self.cache[key]
-        
         # Fetch fresh data
-        logger.info(f"Cache miss for {key}, fetching fresh data")
         data = fetch_func()
         
-        # Only cache if there's no error
-        if not isinstance(data, dict) or "error" not in data:
-            # Update cache
-            self.cache[key] = data
-            self.cache_expiry[key] = current_time + ttl
+        # Cache the result
+        self.cache[key] = data
+        self.cache_expiry[key] = now + ttl
         
         return data
     
     def get_stock_price(self, symbol: str) -> Dict[str, Any]:
         """
-        Get current stock price data for a specific symbol.
+        Get current stock price for a symbol.
         
         Args:
             symbol: The stock symbol to look up
             
         Returns:
-            Current price data
+            Dictionary with price data
         """
-        # Normalize the symbol first
+        # Normalize the symbol
         symbol = self.normalize_symbol(symbol)
-        logger.info(f"\n{'='*80}\nGetting stock price for {symbol}")
         
-        # Create a stable cache key (don't include timestamp to avoid excessive fetches)
+        # Generate cache key
         cache_key = f"price_{symbol}"
         
         def fetch_price():
             try:
-                # Method 1: Direct Yahoo Finance API
+                # Method 1: Direct API call to Yahoo Finance
+                url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                }
+                
                 try:
-                    # Get real-time data directly from Yahoo Finance API
-                    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                    }
-                    
-                    # Log the API request
-                    log_api_request("GET", url, headers=headers)
-                    
-                    response = requests.get(url, headers=headers, timeout=5)
-                    
-                    # Log the API response
-                    log_api_response(response)
+                    response = requests.get(url, headers=headers)
                     
                     if response.status_code == 200:
                         data = response.json()
                         if data and 'quoteResponse' in data and 'result' in data['quoteResponse'] and len(data['quoteResponse']['result']) > 0:
                             quote = data['quoteResponse']['result'][0]
                             if 'regularMarketPrice' in quote:
-                                logger.info(f"Successfully retrieved price via direct API: ${quote['regularMarketPrice']}")
                                 return {
                                     "symbol": symbol,
                                     "price": float(quote['regularMarketPrice']),
@@ -381,111 +286,82 @@ class YahooFinanceMCP:
                                     "llm_response_template": f"The current stock price for {quote.get('shortName', quote.get('longName', symbol))} ({symbol}) is ${float(quote['regularMarketPrice']):.2f} per share."
                                 }
                 except Exception as e:
-                    logger.warning(f"Direct API method failed for {symbol}: {e}")
-                    if isinstance(e, requests.RequestException):
-                        log_api_response(None, error=e)
+                    logger.critical(f"Direct API method failed for {symbol}: {e}")
                 
                 # Method 2: yfinance library
-                logger.info(f"\nTrying yfinance library for {symbol}")
-                ticker = yf.Ticker(symbol)
-                
-                # Try method 2a: Get live quotes
                 try:
-                    logger.info("Attempting to get live quotes...")
-                    # For indices and many stocks, this method works well
-                    quote = ticker.quotes
-                    logger.info(f"Raw quotes response: {json.dumps(quote, indent=2)}")
+                    ticker = yf.Ticker(symbol)
                     
-                    if symbol in quote and quote[symbol] and 'regularMarketPrice' in quote[symbol] and quote[symbol]['regularMarketPrice']:
-                        logger.info(f"Successfully retrieved price via quotes: ${quote[symbol]['regularMarketPrice']}")
-                        return {
-                            "symbol": symbol,
-                            "price": float(quote[symbol]['regularMarketPrice']),
-                            "open": float(quote[symbol]['regularMarketOpen']) if 'regularMarketOpen' in quote[symbol] else 0.0,
-                            "high": float(quote[symbol]['regularMarketDayHigh']) if 'regularMarketDayHigh' in quote[symbol] else 0.0,
-                            "low": float(quote[symbol]['regularMarketDayLow']) if 'regularMarketDayLow' in quote[symbol] else 0.0,
-                            "volume": int(quote[symbol]['regularMarketVolume']) if 'regularMarketVolume' in quote[symbol] else 0,
-                            "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "method": "quotes",
-                            "company_name": quote[symbol].get('shortName', quote[symbol].get('longName', 'N/A')),
-                            "llm_response_template": f"The current stock price for {quote[symbol].get('shortName', quote[symbol].get('longName', symbol))} ({symbol}) is ${float(quote[symbol]['regularMarketPrice']):.2f} per share."
-                        }
-                except Exception as e:
-                    logger.warning(f"Quotes method failed for {symbol}: {e}")
+                    # Try quotes first
+                    try:
+                        quote = ticker.quotes
+                        if quote and symbol in quote and 'regularMarketPrice' in quote[symbol]:
+                            return {
+                                "symbol": symbol,
+                                "price": float(quote[symbol]['regularMarketPrice']),
+                                "open": float(quote[symbol]['regularMarketOpen']) if 'regularMarketOpen' in quote[symbol] else 0.0,
+                                "high": float(quote[symbol]['regularMarketDayHigh']) if 'regularMarketDayHigh' in quote[symbol] else 0.0,
+                                "low": float(quote[symbol]['regularMarketDayLow']) if 'regularMarketDayLow' in quote[symbol] else 0.0,
+                                "volume": int(quote[symbol]['regularMarketVolume']) if 'regularMarketVolume' in quote[symbol] else 0,
+                                "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "method": "yfinance_quotes",
+                                "company_name": quote[symbol].get('shortName', quote[symbol].get('longName', 'N/A')),
+                                "llm_response_template": f"The current stock price for {quote[symbol].get('shortName', quote[symbol].get('longName', symbol))} ({symbol}) is ${float(quote[symbol]['regularMarketPrice']):.2f} per share."
+                            }
+                    except Exception as e:
+                        logger.critical(f"Quotes method failed for {symbol}: {e}")
+                    
+                    # Try info next
+                    try:
+                        info = ticker.info
+                        if info and 'regularMarketPrice' in info:
+                            return {
+                                "symbol": symbol,
+                                "price": float(info['regularMarketPrice']),
+                                "open": float(info['regularMarketOpen']) if 'regularMarketOpen' in info else 0.0,
+                                "high": float(info['regularMarketDayHigh']) if 'regularMarketDayHigh' in info else 0.0,
+                                "low": float(info['regularMarketDayLow']) if 'regularMarketDayLow' in info else 0.0,
+                                "volume": int(info['regularMarketVolume']) if 'regularMarketVolume' in info else 0,
+                                "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "method": "yfinance_info",
+                                "company_name": info.get('shortName', info.get('longName', 'N/A')),
+                                "llm_response_template": f"The current stock price for {info.get('shortName', info.get('longName', symbol))} ({symbol}) is ${float(info['regularMarketPrice']):.2f} per share."
+                            }
+                    except Exception as e:
+                        logger.critical(f"Info method failed for {symbol}: {e}")
+                    
+                    # Try history as last resort
+                    try:
+                        hist = ticker.history(period="1d", interval="1m")
+                        if not hist.empty:
+                            latest = hist.iloc[-1]
+                            return {
+                                "symbol": symbol,
+                                "price": float(latest['Close']),
+                                "open": float(latest['Open']),
+                                "high": float(latest['High']),
+                                "low": float(latest['Low']),
+                                "volume": int(latest['Volume']),
+                                "date": latest.name.strftime("%Y-%m-%d %H:%M:%S"),
+                                "method": "yfinance_history",
+                                "company_name": symbol,  # Basic fallback
+                                "llm_response_template": f"The current stock price for {symbol} is ${float(latest['Close']):.2f} per share."
+                            }
+                    except Exception as e:
+                        logger.critical(f"History method failed for {symbol}: {e}")
                 
-                # Method 2b: Get info
-                try:
-                    logger.info("Attempting to get info...")
-                    # This works for many stocks
-                    info = ticker.info
-                    logger.info(f"Raw info response: {json.dumps(info, indent=2)}")
-                    
-                    if info and 'regularMarketPrice' in info and info['regularMarketPrice']:
-                        logger.info(f"Successfully retrieved price via info: ${info['regularMarketPrice']}")
-                        return {
-                            "symbol": symbol,
-                            "price": float(info['regularMarketPrice']),
-                            "open": float(info['regularMarketOpen']) if 'regularMarketOpen' in info else 0.0,
-                            "high": float(info['regularMarketDayHigh']) if 'regularMarketDayHigh' in info else 0.0,
-                            "low": float(info['regularMarketDayLow']) if 'regularMarketDayLow' in info else 0.0,
-                            "volume": int(info['regularMarketVolume']) if 'regularMarketVolume' in info else 0,
-                            "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "method": "info",
-                            "company_name": info.get('shortName', info.get('longName', 'N/A')),
-                            "llm_response_template": f"The current stock price for {info.get('shortName', info.get('longName', symbol))} ({symbol}) is ${float(info['regularMarketPrice']):.2f} per share."
-                        }
                 except Exception as e:
-                    logger.warning(f"Info method failed for {symbol}: {e}")
-                
-                # Method 2c: Get history
-                try:
-                    logger.info("Attempting to get history...")
-                    # Last resort - most compatible but not always up to date
-                    data = ticker.history(period="1d", interval="1m", auto_adjust=True)
-                    
-                    if not data.empty:
-                        # Get the latest row (most recent data point)
-                        latest = data.iloc[-1]
-                        logger.info(f"Raw history data for latest point: {latest.to_dict()}")
-                        
-                        # Format the date
-                        date_str = data.index[-1].strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(f"Successfully retrieved price via history: ${latest['Close']}")
-                        
-                        # Try to get company name from info
-                        try:
-                            company_name = ticker.info.get('shortName', ticker.info.get('longName', 'N/A'))
-                        except:
-                            company_name = 'N/A'
-                        
-                        return {
-                            "symbol": symbol,
-                            "price": float(latest["Close"]),
-                            "open": float(latest["Open"]),
-                            "high": float(latest["High"]),
-                            "low": float(latest["Low"]),
-                            "volume": int(latest["Volume"]),
-                            "date": date_str,
-                            "method": "history",
-                            "company_name": company_name,
-                            "llm_response_template": f"The current stock price for {company_name} ({symbol}) is ${float(latest['Close']):.2f} per share."
-                        }
-                except Exception as e:
-                    logger.warning(f"History method failed for {symbol}: {e}")
+                    logger.critical(f"All yfinance methods failed for {symbol}: {e}")
                 
                 # All methods failed
-                logger.error(f"All methods failed for {symbol}")
                 return {"error": f"Could not retrieve stock price for {symbol} after trying all methods"}
                 
             except Exception as e:
-                logger.error(f"Error fetching price for {symbol}: {str(e)}")
+                logger.critical(f"Error fetching price for {symbol}: {str(e)}")
                 return {"error": f"Failed to retrieve stock price for {symbol}: {str(e)}"}
         
         # Use caching with reasonable TTL
-        result = self._get_cached_or_fetch(cache_key, fetch_price, self.PRICE_CACHE_TTL)
-        logger.info(f"Final result for {symbol}: {json.dumps(result, indent=2)}")
-        logger.info(f"{'='*80}\n")
-        return result
+        return self._get_cached_or_fetch(cache_key, fetch_price, self.PRICE_CACHE_TTL)
     
     def get_multiple_stock_prices(self, symbols: List[str]) -> Dict[str, Any]:
         """
@@ -497,8 +373,6 @@ class YahooFinanceMCP:
         Returns:
             Dictionary with price data for each symbol
         """
-        logger.info(f"Getting stock prices for multiple symbols: {symbols}")
-        
         if not symbols:
             return {"error": "No symbols provided"}
         
@@ -507,7 +381,6 @@ class YahooFinanceMCP:
         
         # Limit to a reasonable number of symbols
         if len(normalized_symbols) > 20:
-            logger.warning(f"Too many symbols requested ({len(normalized_symbols)}), limiting to 20")
             normalized_symbols = normalized_symbols[:20]
         
         # Simplified approach - just get prices one by one
@@ -523,276 +396,140 @@ class YahooFinanceMCP:
     
     def get_stock_info(self, symbol: str) -> Dict[str, Any]:
         """
-        Get detailed company information for a stock symbol.
+        Get company information for a symbol.
         
         Args:
             symbol: The stock symbol to look up
             
         Returns:
-            Detailed company information
+            Dictionary with company information
         """
-        logger.info(f"Getting company info for {symbol}")
+        # Normalize the symbol
+        symbol = self.normalize_symbol(symbol)
         
+        # Generate cache key
         cache_key = f"info_{symbol}"
         
         def fetch_info():
             try:
-                # Get company information from Yahoo Finance
                 ticker = yf.Ticker(symbol)
                 info = ticker.info
                 
-                if not info:
-                    return {"error": f"No information found for symbol: {symbol}"}
-                
-                # Extract relevant information and handle missing fields gracefully
-                result = {
-                    "symbol": symbol,
-                    "name": info.get("shortName", info.get("longName", "N/A")),
-                    "sector": info.get("sector", "N/A"),
-                    "industry": info.get("industry", "N/A"),
-                    "marketCap": info.get("marketCap", "N/A"),
-                    "trailingPE": info.get("trailingPE", "N/A"),
-                    "dividendYield": info.get("dividendYield", "N/A") * 100 if info.get("dividendYield") is not None else "N/A",
-                    "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow", "N/A"),
-                    "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh", "N/A"),
-                    "website": info.get("website", "N/A"),
-                    "longBusinessSummary": info.get("longBusinessSummary", "No business summary available.")
-                }
-                
-                # Also return the raw info data for custom field access
-                result["raw_info"] = info
-                
-                return result
+                if info:
+                    return {
+                        "symbol": symbol,
+                        "info": info,
+                        "company_name": info.get('shortName', info.get('longName', 'N/A')),
+                        "llm_response_template": f"Here is the company information for {info.get('shortName', info.get('longName', symbol))} ({symbol}): {json.dumps(info, indent=2)}"
+                    }
+                else:
+                    return {"error": f"No information found for {symbol}"}
+                    
             except Exception as e:
-                logger.error(f"Error fetching info for {symbol}: {str(e)}")
+                logger.critical(f"Error fetching info for {symbol}: {str(e)}")
                 return {"error": f"Failed to retrieve company information for {symbol}: {str(e)}"}
         
         return self._get_cached_or_fetch(cache_key, fetch_info, self.INFO_CACHE_TTL)
-    
+
     def get_stock_field(self, symbol: str, field: str) -> Dict[str, Any]:
         """
-        Get a specific field from a stock's information.
+        Get a specific field from company information.
         
         Args:
             symbol: The stock symbol to look up
-            field: The specific field to retrieve
+            field: The field to retrieve
             
         Returns:
-            The requested field value and metadata
+            Dictionary with the field value
         """
-        logger.info(f"Getting field '{field}' for {symbol}")
+        # Normalize the symbol
+        symbol = self.normalize_symbol(symbol)
         
-        # First get all the stock info
-        stock_info = self.get_stock_info(symbol)
+        # Generate cache key
+        cache_key = f"field_{symbol}_{field}"
         
-        if "error" in stock_info:
-            return stock_info
-            
-        # Get the raw info data
-        raw_info = stock_info.get("raw_info", {})
+        def fetch_field():
+            try:
+                # Get company info
+                info = self.get_stock_info(symbol)
+                
+                if "error" in info:
+                    return info
+                
+                if field in info["info"]:
+                    value = info["info"][field]
+                    
+                    # Format the field name for display
+                    field_description = " ".join(re.findall('[A-Z][^A-Z]*', field)).lower()
+                    if not field_description:
+                        field_description = field.lower()
+                    
+                    return {
+                        "symbol": symbol,
+                        "field": field,
+                        "field_description": field_description,
+                        "value": value,
+                        "company_name": info["company_name"],
+                        "llm_response_template": f"The {field_description} for {info['company_name']} ({symbol}) is {value}"
+                    }
+                else:
+                    return {"error": f"Field '{field}' not found for {symbol}"}
+                    
+            except Exception as e:
+                logger.critical(f"Error fetching field '{field}' for {symbol}: {str(e)}")
+                return {"error": f"Failed to retrieve field '{field}' for {symbol}: {str(e)}"}
         
-        if not raw_info:
-            return {"error": f"No raw info data available for {symbol}"}
-            
-        # Check if the requested field exists
-        if field not in raw_info:
-            return {"error": f"Field '{field}' not found in data for {symbol}"}
-            
-        # Get the field value
-        field_value = raw_info[field]
-        
-        # Format the response
-        company_name = raw_info.get("shortName", raw_info.get("longName", symbol))
-        
-        # Create a formatted response
-        result = {
-            "symbol": symbol,
-            "field": field,
-            "value": field_value,
-            "company_name": company_name,
-            "field_description": self._get_field_description(field),
-            "llm_response_template": self._format_field_response(company_name, symbol, field, field_value)
-        }
-        
-        return result
-        
+        return self._get_cached_or_fetch(cache_key, fetch_field, self.INFO_CACHE_TTL)
+
     def get_multiple_stock_fields(self, symbol: str, fields: List[str]) -> Dict[str, Any]:
         """
-        Get multiple fields from a stock's information.
+        Get multiple fields from company information.
         
         Args:
             symbol: The stock symbol to look up
             fields: List of fields to retrieve
             
         Returns:
-            The requested field values and metadata
+            Dictionary with field values
         """
-        logger.info(f"Getting fields {fields} for {symbol}")
+        # Normalize the symbol
+        symbol = self.normalize_symbol(symbol)
         
-        # First get all the stock info
-        stock_info = self.get_stock_info(symbol)
+        # Generate cache key
+        cache_key = f"fields_{symbol}_{'_'.join(fields)}"
         
-        if "error" in stock_info:
-            return stock_info
-            
-        # Get the raw info data
-        raw_info = stock_info.get("raw_info", {})
-        
-        if not raw_info:
-            return {"error": f"No raw info data available for {symbol}"}
-            
-        # Get the company name
-        company_name = raw_info.get("shortName", raw_info.get("longName", symbol))
-        
-        # Get the field values
-        results = {
-            "symbol": symbol,
-            "company_name": company_name,
-            "fields": []
-        }
-        
-        llm_templates = []
-        
-        for field in fields:
-            if field in raw_info:
-                field_value = raw_info[field]
-                field_data = {
-                    "field": field,
-                    "value": field_value,
-                    "field_description": self._get_field_description(field)
-                }
-                results["fields"].append(field_data)
-                llm_templates.append(self._format_field_response(company_name, symbol, field, field_value))
-            else:
-                field_data = {
-                    "field": field,
-                    "value": "N/A",
-                    "field_description": self._get_field_description(field),
-                    "error": f"Field '{field}' not found in data for {symbol}"
-                }
-                results["fields"].append(field_data)
+        def fetch_fields():
+            try:
+                results = []
+                for field in fields:
+                    field_data = self.get_stock_field(symbol, field)
+                    if "error" not in field_data:
+                        results.append(field_data)
                 
-        # Add templates for LLM response
-        results["llm_response_template"] = "\n".join(llm_templates)
-        
-        return results
-        
-    def _get_field_description(self, field: str) -> str:
-        """Get a human-readable description for a field."""
-        field_descriptions = {
-            # Company info
-            "shortName": "Short company name",
-            "longName": "Full company name",
-            "sector": "Business sector",
-            "industry": "Industry category",
-            "website": "Company website URL",
-            "address1": "Street address",
-            "city": "City",
-            "state": "State",
-            "zip": "ZIP code",
-            "country": "Country",
-            "phone": "Phone number",
-            "fullTimeEmployees": "Number of full-time employees",
-            "longBusinessSummary": "Business description",
-            
-            # Financial metrics
-            "marketCap": "Market capitalization in USD",
-            "trailingPE": "Trailing price-to-earnings ratio",
-            "forwardPE": "Forward price-to-earnings ratio",
-            "dividendRate": "Annual dividend rate",
-            "dividendYield": "Dividend yield as a percentage",
-            "payoutRatio": "Dividend payout ratio",
-            "beta": "Beta (volatility measure)",
-            "priceToBook": "Price-to-book ratio",
-            "debtToEquity": "Debt-to-equity ratio",
-            "returnOnEquity": "Return on equity",
-            "returnOnAssets": "Return on assets",
-            "revenuePerShare": "Revenue per share",
-            "profitMargins": "Profit margins",
-            "grossMargins": "Gross margins",
-            "operatingMargins": "Operating margins",
-            "totalRevenue": "Total revenue",
-            "totalCash": "Total cash",
-            "totalDebt": "Total debt",
-            "earningsGrowth": "Earnings growth",
-            "revenueGrowth": "Revenue growth",
-            "freeCashflow": "Free cash flow",
-            "operatingCashflow": "Operating cash flow",
-            
-            # Stock price metrics
-            "currentPrice": "Current stock price",
-            "previousClose": "Previous closing price",
-            "open": "Opening price",
-            "dayLow": "Day's low price",
-            "dayHigh": "Day's high price",
-            "fiftyTwoWeekLow": "52-week low price",
-            "fiftyTwoWeekHigh": "52-week high price",
-            "fiftyDayAverage": "50-day moving average",
-            "twoHundredDayAverage": "200-day moving average",
-            "averageVolume": "Average daily volume",
-            "volume": "Current volume",
-            "targetHighPrice": "Highest analyst target price",
-            "targetLowPrice": "Lowest analyst target price",
-            "targetMeanPrice": "Mean analyst target price",
-            "recommendationMean": "Average analyst recommendation (1=Strong Buy, 5=Strong Sell)",
-            "recommendationKey": "Analyst recommendation key",
-            "numberOfAnalystOpinions": "Number of analyst opinions"
-        }
-        
-        return field_descriptions.get(field, f"Value for {field}")
-        
-    def _format_field_response(self, company_name: str, symbol: str, field: str, value: Any) -> str:
-        """Format a field value for LLM response."""
-        field_description = self._get_field_description(field)
-        
-        # Format different types of values appropriately
-        formatted_value = value
-        
-        # Special handling for company officers
-        if field == "companyOfficers" and isinstance(value, list) and len(value) > 0:
-            # Format the company officers data
-            officers_text = []
-            for officer in value[:5]:  # Limit to first 5 officers to avoid too much text
-                name = officer.get("name", "Unknown")
-                title = officer.get("title", "Unknown position")
-                age = officer.get("age", "")
-                age_text = f", {age} years old" if age else ""
-                
-                # Check if we have pay data
-                pay = officer.get("totalPay", 0)
-                pay_text = ""
-                if pay:
-                    pay_text = f", Total compensation: ${pay:,}"
+                if results:
+                    # Get company name from first result
+                    company_name = results[0]["company_name"]
                     
-                officers_text.append(f"- {name}: {title}{age_text}{pay_text}")
-            
-            formatted_value = "\n" + "\n".join(officers_text)
-            return f"Company Officers for {company_name} ({symbol}):{formatted_value}"
-        
-        # Format numbers
-        if isinstance(value, (int, float)):
-            if field in ["marketCap", "totalCash", "totalDebt", "totalRevenue", "freeCashflow", "operatingCashflow"]:
-                # Format large dollar amounts
-                if value >= 1_000_000_000:
-                    formatted_value = f"${value / 1_000_000_000:.2f} billion"
-                elif value >= 1_000_000:
-                    formatted_value = f"${value / 1_000_000:.2f} million"
+                    # Create response template
+                    field_values = []
+                    for result in results:
+                        field_values.append(f"{result['field_description']}: {result['value']}")
+                    
+                    return {
+                        "symbol": symbol,
+                        "fields": results,
+                        "company_name": company_name,
+                        "llm_response_template": f"For {company_name} ({symbol}):\n" + "\n".join([f"- {value}" for value in field_values])
+                    }
                 else:
-                    formatted_value = f"${value:,}"
-            elif field in ["currentPrice", "previousClose", "open", "dayLow", "dayHigh", "fiftyTwoWeekLow", 
-                           "fiftyTwoWeekHigh", "targetHighPrice", "targetLowPrice", "targetMeanPrice"]:
-                # Format prices
-                formatted_value = f"${value:.2f}"
-            elif field in ["dividendYield", "profitMargins", "grossMargins", "operatingMargins", 
-                           "returnOnEquity", "returnOnAssets", "earningsGrowth", "revenueGrowth"]:
-                # Format percentages
-                formatted_value = f"{value * 100:.2f}%" if value < 1 else f"{value:.2f}%"
+                    return {"error": f"No fields could be retrieved for {symbol}"}
+                    
+            except Exception as e:
+                logger.critical(f"Error fetching fields for {symbol}: {str(e)}")
+                return {"error": f"Failed to retrieve fields for {symbol}: {str(e)}"}
         
-        # Create a natural language response
-        response = f"{field_description} for {company_name} ({symbol}): {formatted_value}"
-        
-        return response
-    
+        return self._get_cached_or_fetch(cache_key, fetch_fields, self.INFO_CACHE_TTL)
+
     def get_stock_history(self, symbol: str, period: str) -> Dict[str, Any]:
         """
         Get historical stock data for a relative time period.
@@ -804,8 +541,10 @@ class YahooFinanceMCP:
         Returns:
             Historical stock data
         """
-        logger.info(f"Getting historical data for {symbol} over period {period}")
+        # Normalize the symbol
+        symbol = self.normalize_symbol(symbol)
         
+        # Generate cache key
         cache_key = f"history_{symbol}_{period}"
         
         def fetch_history():
@@ -841,12 +580,13 @@ class YahooFinanceMCP:
                     "period": period,
                     "data": data_points
                 }
+                    
             except Exception as e:
-                logger.error(f"Error fetching history for {symbol}: {str(e)}")
+                logger.critical(f"Error fetching history for {symbol}: {str(e)}")
                 return {"error": f"Failed to retrieve historical data for {symbol}: {str(e)}"}
         
         return self._get_cached_or_fetch(cache_key, fetch_history, self.INFO_CACHE_TTL)
-    
+
     def get_stock_history_range(self, symbol: str, start_date: str, end_date: str) -> Dict[str, Any]:
         """
         Get historical stock data for a specific date range.
@@ -857,41 +597,42 @@ class YahooFinanceMCP:
             end_date: End date in YYYY-MM-DD format
             
         Returns:
-            Historical stock data for the specified range
+            Historical stock data
         """
-        logger.info(f"Getting historical data for {symbol} from {start_date} to {end_date}")
+        # Normalize the symbol
+        symbol = self.normalize_symbol(symbol)
         
+        # Generate cache key
         cache_key = f"history_range_{symbol}_{start_date}_{end_date}"
         
         def fetch_history_range():
             try:
-                # Parse dates
+                # Convert dates to datetime objects
                 start = pd.to_datetime(start_date)
                 end = pd.to_datetime(end_date)
                 
-                # Calculate appropriate interval based on date range
-                days_diff = (end - start).days
-                if days_diff <= 7:
-                    interval = "1h"  # hourly for <= 1 week
-                elif days_diff <= 30:
-                    interval = "1d"  # daily for <= 1 month
-                elif days_diff <= 90:
-                    interval = "1d"  # daily for <= 3 months
+                # Calculate date difference to determine appropriate interval
+                date_diff = (end - start).days
+                
+                if date_diff <= 7:
+                    interval = "5m"  # 5-minute intervals for <= 7 days
+                elif date_diff <= 30:
+                    interval = "1h"  # Hourly intervals for <= 30 days
                 else:
-                    interval = "1wk"  # weekly for > 3 months
+                    interval = "1d"  # Daily intervals for > 30 days
                 
                 # Get historical data from Yahoo Finance
                 ticker = yf.Ticker(symbol)
                 hist = ticker.history(start=start_date, end=end_date, interval=interval)
                 
                 if hist.empty:
-                    return {"error": f"No historical data found for {symbol} from {start_date} to {end_date}"}
+                    return {"error": f"No historical data found for {symbol} between {start_date} and {end_date}"}
                 
                 # Convert to list of dictionaries for easier processing
                 data_points = []
                 for date, row in hist.iterrows():
                     data_points.append({
-                        "date": date.strftime("%Y-%m-%d"),
+                        "date": date.strftime("%Y-%m-%d %H:%M:%S"),
                         "close": float(row["Close"]),
                         "open": float(row["Open"]),
                         "high": float(row["High"]),
@@ -899,79 +640,70 @@ class YahooFinanceMCP:
                         "volume": int(row["Volume"])
                     })
                 
-                # Get the period description
-                period_desc = f"{start_date} to {end_date}"
-                
                 return {
                     "symbol": symbol,
-                    "period": period_desc,
                     "start_date": start_date,
                     "end_date": end_date,
                     "data": data_points
                 }
+                    
             except Exception as e:
-                logger.error(f"Error fetching history range for {symbol}: {str(e)}")
-                return {"error": f"Failed to retrieve historical data for {symbol} from {start_date} to {end_date}: {str(e)}"}
+                logger.critical(f"Error fetching history range for {symbol}: {str(e)}")
+                return {"error": f"Failed to retrieve historical data for {symbol}: {str(e)}"}
         
         return self._get_cached_or_fetch(cache_key, fetch_history_range, self.INFO_CACHE_TTL)
-    
+
     def get_market_news(self, symbol: Optional[str] = None, limit: int = 5) -> Dict[str, Any]:
         """
-        Get latest market news or company-specific news.
+        Get market news for a symbol or general market news.
         
         Args:
-            symbol: Optional symbol for company-specific news
+            symbol: Optional stock symbol to get news for
             limit: Maximum number of news items to return
             
         Returns:
-            Latest market news
+            Dictionary with news items
         """
-        logger.info(f"Getting market news for {'general market' if symbol is None else symbol}")
+        # Normalize the symbol if provided
+        if symbol:
+            symbol = self.normalize_symbol(symbol)
         
+        # Generate cache key
         cache_key = f"news_{symbol if symbol else 'market'}"
         
         def fetch_news():
             try:
                 if symbol:
-                    # Get company-specific news
                     ticker = yf.Ticker(symbol)
-                    news_items = ticker.news
-                    
-                    if not news_items:
-                        # Fallback to general market news if no company news
-                        ticker_sp = yf.Ticker("^GSPC")  # S&P 500 as backup
-                        news_items = ticker_sp.news
+                    news = ticker.news
                 else:
-                    # Get general market news
-                    ticker = yf.Ticker("^GSPC")  # S&P 500
-                    news_items = ticker.news
+                    # For general market news, use ^GSPC (S&P 500)
+                    ticker = yf.Ticker("^GSPC")
+                    news = ticker.news
                 
-                if not news_items:
-                    return {"error": "No market news found"}
+                if not news:
+                    return {"error": f"No news found for {symbol if symbol else 'the market'}"}
                 
-                # Process and format news items
-                processed_news = []
-                for item in news_items[:limit]:
-                    # Format the date if available
-                    publish_date = "Unknown"
-                    if "providerPublishTime" in item:
-                        timestamp = item["providerPublishTime"]
-                        publish_date = datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    processed_news.append({
-                        "title": item.get("title", "No title"),
-                        "publisher": item.get("publisher", "Unknown"),
-                        "link": item.get("link", "#"),
-                        "published": publish_date
+                # Process news items
+                news_items = []
+                for item in news[:limit]:
+                    news_items.append({
+                        "title": item.get("title", ""),
+                        "publisher": item.get("publisher", ""),
+                        "link": item.get("link", ""),
+                        "published": datetime.datetime.fromtimestamp(item.get("providerPublishTime", 0)).strftime("%Y-%m-%d %H:%M:%S")
                     })
                 
                 return {
-                    "symbol": symbol,
-                    "news": processed_news
+                    "symbol": symbol if symbol else "market",
+                    "news": news_items,
+                    "llm_response_template": f"Here are the latest news items for {symbol if symbol else 'the market'}:\n" + 
+                                          "\n".join([f"{i+1}. {item['title']} - {item['publisher']}" for i, item in enumerate(news_items)])
                 }
+                    
             except Exception as e:
-                logger.error(f"Error fetching news: {str(e)}")
-                return {"error": f"Failed to retrieve market news: {str(e)}"}
+                logger.critical(f"Error fetching news: {str(e)}")
+                return {"error": f"Failed to retrieve news: {str(e)}"}
         
         return self._get_cached_or_fetch(cache_key, fetch_news, self.NEWS_CACHE_TTL)
 

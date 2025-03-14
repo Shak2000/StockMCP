@@ -76,11 +76,9 @@ class MCPOllamaIntegration:
         self.conversation_history = []
         
         # Print initialization information
-        print(f"Initializing Yahoo Finance MCP for {self.model} via Ollama...")
         print("Model Context Protocol ready!")
         print(f"Model: {self.model}")
-        print("MCP: Yahoo Finance API (Stock prices, company info, history, and market news)")
-        print("\nYou can now ask financial questions, and the model will use real-time Yahoo Finance data.")
+        print("You can now ask financial questions, and the model will use real-time Yahoo Finance data.")
         print("For example:")
         print("- What is the current price of Apple stock?")
         print("- Tell me about Tesla as a company")

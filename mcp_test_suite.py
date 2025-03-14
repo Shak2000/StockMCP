@@ -23,10 +23,23 @@ def print_result(query, result):
     template = result.get("llm_response_template", None)
     if template:
         print(f"RESPONSE: {template}")
+    else:
+        # Fallback formatting if template is not available
+        if "price" in result:
+            # Stock price query
+            print(f"RESPONSE: The current stock price for {result.get('company_name', result.get('symbol'))} ({result.get('symbol')}) is ${result.get('price', 'N/A'):.2f} per share.")
+        elif "value" in result:
+            # Single field query
+            print(f"RESPONSE: {result.get('field_description', result.get('field', 'Value'))} for {result.get('company_name', result.get('symbol'))} ({result.get('symbol')}): {result.get('value', 'N/A')}")
+        elif "fields" in result and isinstance(result["fields"], list):
+            # Multiple fields query
+            print(f"RESPONSE: For {result.get('company_name', result.get('symbol'))} ({result.get('symbol')}):")
+            for field in result["fields"]:
+                print(f"- {field.get('field_description', field.get('field', 'Value'))}: {field.get('value', 'N/A')}")
+        else:
+            # Generic fallback without showing raw data
+            print(f"RESPONSE: Retrieved information for {result.get('symbol', 'the requested stock')}.")
     
-    # Print raw result for inspection
-    print("\nRAW RESULT:")
-    print(json.dumps(result, indent=2, default=str))
     print(f"{'=' * 80}\n")
 
 def run_test_suite():
