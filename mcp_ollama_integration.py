@@ -13,6 +13,7 @@ import time
 import ollama
 import argparse
 from typing import Dict, Any, List, Tuple, Optional
+import datetime
 
 # Import our Yahoo Finance MCP
 from yahoo_finance_mcp import YahooFinanceMCP
@@ -89,6 +90,88 @@ class MCPOllamaIntegration:
         print("Enter 'exit', 'quit', or 'q' to quit.")
         print("-" * 70)
     
+    def _extract_companies(self, query: str) -> List[str]:
+        """
+        Extract company symbols from a query.
+        
+        Args:
+            query: The query to extract companies from
+            
+        Returns:
+            List of company symbols found in the query
+        """
+        query_lower = query.lower()
+        companies_found = []
+        
+        # First try exact matches
+        for company, symbol in COMPANIES:
+            # Look for company name as a whole word
+            company_pattern = r'\b' + re.escape(company.lower()) + r'\b'
+            symbol_pattern = r'\b' + re.escape(symbol.lower()) + r'\b'
+            
+            if re.search(company_pattern, query_lower) or re.search(symbol_pattern, query_lower):
+                companies_found.append(symbol)
+        
+        # If no exact matches, try fuzzy matching for company names
+        if not companies_found:
+            for company, symbol in COMPANIES:
+                if any(word in company.lower() for word in query_lower.split()):
+                    companies_found.append(symbol)
+        
+        return companies_found
+
+    def _is_future_date_query(self, query_lower: str) -> bool:
+        """
+        Check if the query is asking about a future date.
+        
+        Args:
+            query_lower: Lowercase query string
+            
+        Returns:
+            True if the query is about a future date, False otherwise
+        """
+        current_year = datetime.datetime.now().year
+        
+        # Check for future year
+        year_match = re.search(self.YEAR_PATTERN, query_lower)
+        if year_match:
+            year = int(year_match.group(1))
+            if year > current_year:
+                return True
+        
+        # Check for future quarter
+        quarter_match = re.search(self.QUARTER_PATTERN, query_lower)
+        if quarter_match:
+            year = int(quarter_match.group(2))
+            if year > current_year:
+                return True
+        
+        # Check for future half
+        half_match = re.search(self.HALF_PATTERN, query_lower)
+        if half_match:
+            year = int(half_match.group(2))
+            if year > current_year:
+                return True
+        
+        # Check for future month and year
+        month_year_match = re.search(self.MONTH_YEAR_PATTERN, query_lower)
+        if month_year_match:
+            month_name = month_year_match.group(1)
+            year = int(month_year_match.group(2))
+            if year > current_year:
+                return True
+            elif year == current_year:
+                current_month = datetime.datetime.now().month
+                month_num = {
+                    'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                    'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                    'september': 9, 'october': 10, 'november': 11, 'december': 12
+                }[month_name]
+                if month_num > current_month:
+                    return True
+        
+        return False
+    
     def _parse_historical_period(self, query_lower: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parse historical time periods from the query.
@@ -96,7 +179,6 @@ class MCPOllamaIntegration:
         Returns:
             Tuple of (start_date, end_date, period_description)
         """
-        import datetime
         from dateutil.relativedelta import relativedelta
         
         # Check for specific year
@@ -184,105 +266,133 @@ class MCPOllamaIntegration:
         
         return None, None, "1mo"  # default period
     
-    def detect_financial_query(self, query: str) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
-        """
-        Detect if a query is finance-related and should use the MCP.
-        
-        Args:
-            query: The user query to analyze
-            
-        Returns:
-            Tuple of (function_name, description, parameters) if it's a financial query,
-            or (None, None, None) if it's not a financial query
-        """
+    def detect_financial_query(self, query: str) -> Dict[str, Any]:
+        """Detect if the query is asking for financial data and what type."""
+        # Normalize query to lowercase for pattern matching
         query_lower = query.lower()
         
-        # Check if a company name or ticker is mentioned
-        company_matches = []
-        for company, symbol in COMPANIES:
-            # Look for company name as a whole word
-            company_pattern = r'\b' + re.escape(company) + r'\b'
-            symbol_pattern = r'\b' + re.escape(symbol.lower()) + r'\b'
+        # First, check if this is a future date query
+        if self._is_future_date_query(query_lower):
+            return {
+                "function": "handle_future_date_query",
+                "parameters": {"query": query}
+            }
+        
+        # Initialize parameters
+        parameters = {}
+        
+        # Extract company names/symbols
+        companies = self._extract_companies(query)
+        if not companies:
+            return None
             
-            if re.search(company_pattern, query_lower) or re.search(symbol_pattern, query_lower):
-                company_matches.append((company, symbol))
+        # Normalize company symbols
+        companies = [self.mcp.normalize_symbol(company) for company in companies]
+        # Remove duplicates while preserving order
+        companies = list(dict.fromkeys(companies))
         
-        if not company_matches:
-            # If no exact matches, try fuzzy matching for company names
-            for company, symbol in COMPANIES:
-                if any(word in company for word in query_lower.split()):
-                    company_matches.append((company, symbol))
+        # Check for price query patterns
+        price_patterns = [
+            r"(what( is|'s)|get|show|tell me|how much is) .* (stock |share )?price",
+            r"(what( is|'s)|get|show|tell me|how much) .* trading at",
+            r"(what( is|'s)|get|show|tell me) .* stock",
+            r"how (much|many) (does|do) .* (cost|trade for)",
+            r"current (price|value|stock) of .*"
+        ]
         
-        # Stock price query
-        if company_matches and (re.search(STOCK_PRICE_PATTERN, query_lower) or
-                              any(term in query_lower for term in ["stock price", "share price", "trading at"])):
-            # If multiple companies mentioned, handle them all
-            if len(company_matches) > 1:
-                companies_str = ", ".join(f"{c.title()} ({s})" for c, s in company_matches)
-                return (
-                    "get_multiple_stock_prices",
-                    f"Getting current stock prices for {companies_str}",
-                    {"symbols": [symbol for _, symbol in company_matches]}
-                )
+        if any(re.search(pattern, query_lower) for pattern in price_patterns):
+            if len(companies) == 1:
+                return {
+                    "function": "get_stock_price",
+                    "parameters": {
+                        "symbol": companies[0],
+                        "response_instruction": "IMPORTANT: Please use the exact price from the API response's llm_response_template field. Do not use any other source for the price."
+                    }
+                }
             else:
-                company, symbol = company_matches[0]
-                return (
-                    "get_stock_price",
-                    f"Getting current stock price for {company.title()} ({symbol})",
-                    {"symbol": symbol}
-                )
+                return {
+                    "function": "get_multiple_stock_prices",
+                    "parameters": {
+                        "symbols": companies,
+                        "response_instruction": "IMPORTANT: Please use the exact prices from the API response's llm_response_template fields. Do not use any other source for the prices."
+                    }
+                }
         
         # Company information query
-        elif company_matches and (re.search(COMPANY_INFO_PATTERN, query_lower) or
-                                any(term in query_lower for term in ["what is", "who is", "tell me about"]) and 
-                                any(term in query_lower for term in ["company", "business", "sector", "industry"])):
-            company, symbol = company_matches[0]  # Use first company if multiple mentioned
-            return (
-                "get_stock_info",
-                f"Getting company information for {company.title()} ({symbol})",
-                {"symbol": symbol}
-            )
+        elif any(re.search(pattern, query_lower) for pattern in [COMPANY_INFO_PATTERN, r'(about|info|information|details|tell me about).*?(company|business|corporation)']):
+            if len(companies) == 1:
+                return {
+                    "function": "get_stock_info",
+                    "parameters": {
+                        "symbol": companies[0],
+                        "response_instruction": "IMPORTANT: Please use the exact information from the API response's llm_response_template field. Do not use any other source for the information."
+                    }
+                }
+            else:
+                return {
+                    "function": "get_stock_info",
+                    "parameters": {
+                        "symbols": companies,
+                        "response_instruction": "IMPORTANT: Please use the exact information from the API response's llm_response_template fields. Do not use any other source for the information."
+                    }
+                }
         
         # Stock history query
-        elif company_matches and (re.search(STOCK_HISTORY_PATTERN, query_lower) or
-                                any(timeframe in query_lower for term in ["performance", "trend", "movement", "history"] 
-                                    for timeframe in ["day", "week", "month", "year", "quarter"])):
-            company, symbol = company_matches[0]  # Use first company if multiple mentioned
-            
-            # Parse the historical period
-            start_date, end_date, period = self._parse_historical_period(query_lower)
-            
-            if start_date and end_date:
-                return (
-                    "get_stock_history",
-                    f"Getting historical stock data for {company.title()} ({symbol}) from {start_date} to {end_date}",
-                    {"symbol": symbol, "start_date": start_date, "end_date": end_date}
-                )
+        elif any(re.search(pattern, query_lower) for pattern in [STOCK_HISTORY_PATTERN, r'(history|historical|performance|trend|movement|chart|change).*?(stock|share|price)']):
+            if len(companies) == 1:
+                # Parse the historical period
+                start_date, end_date, period = self._parse_historical_period(query_lower)
+                
+                if start_date and end_date:
+                    return {
+                        "function": "get_stock_history",
+                        "parameters": {
+                            "symbol": companies[0],
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "response_instruction": "IMPORTANT: Please use the exact historical data from the API response's llm_response_template field. Do not use any other source for the data."
+                        }
+                    }
+                else:
+                    return {
+                        "function": "get_stock_history",
+                        "parameters": {
+                            "symbol": companies[0],
+                            "period": period,
+                            "response_instruction": "IMPORTANT: Please use the exact historical data from the API response's llm_response_template field. Do not use any other source for the data."
+                        }
+                    }
             else:
-                return (
-                    "get_stock_history",
-                    f"Getting historical stock data for {company.title()} ({symbol}) over {period}",
-                    {"symbol": symbol, "period": period}
-                )
+                return {
+                    "function": "get_stock_history",
+                    "parameters": {
+                        "symbols": companies,
+                        "response_instruction": "IMPORTANT: Please use the exact historical data from the API response's llm_response_template fields. Do not use any other source for the data."
+                    }
+                }
         
         # News query
         elif re.search(NEWS_PATTERN, query_lower):
-            if company_matches:
-                company, symbol = company_matches[0]  # Use first company if multiple mentioned
-                return (
-                    "get_market_news",
-                    f"Getting latest news for {company.title()}",
-                    {"symbol": symbol, "limit": 5}
-                )
+            if companies:
+                return {
+                    "function": "get_market_news",
+                    "parameters": {
+                        "symbols": companies,
+                        "limit": 5,
+                        "response_instruction": "IMPORTANT: Please use the exact news from the API response's llm_response_template field. Do not use any other source for the news."
+                    }
+                }
             elif any(term in query_lower for term in ["market", "stock", "financial", "business", "economy"]):
-                return (
-                    "get_market_news",
-                    "Getting latest market news",
-                    {"limit": 5}
-                )
+                return {
+                    "function": "get_market_news",
+                    "parameters": {
+                        "limit": 5,
+                        "response_instruction": "IMPORTANT: Please use the exact market news from the API response's llm_response_template field. Do not use any other source for the news."
+                    }
+                }
         
         # Not a financial query
-        return None, None, None
+        return None
     
     def format_financial_data(self, function_name: str, result: Dict[str, Any]) -> str:
         """
@@ -424,13 +534,30 @@ class MCPOllamaIntegration:
             The model's response
         """
         # Detect if this is a financial query
-        function_name, description, parameters = self.detect_financial_query(query)
+        detected_query = self.detect_financial_query(query)
         
-        if function_name:
-            print(f"Detected financial query! {description}")
+        if detected_query:
+            function_name = detected_query["function"]
+            parameters = detected_query["parameters"]
+            response_instruction = parameters.get("response_instruction", "")
             
             # Get financial data using the MCP
             financial_data = self.mcp.execute_function(function_name, parameters)
+            
+            # Check if we have a template response in the data
+            template_response = None
+            if isinstance(financial_data, dict):
+                if "llm_response_template" in financial_data:
+                    template_response = financial_data["llm_response_template"]
+                elif "prices" in financial_data and financial_data["prices"]:
+                    # Handle multiple stock prices
+                    template_response = "\n".join(
+                        price["llm_response_template"]
+                        for price in financial_data["prices"]
+                        if "llm_response_template" in price
+                    )
+            
+            # Format the data for the LLM
             formatted_data = self.format_financial_data(function_name, financial_data)
             
             # Add context to the query for the model
@@ -438,7 +565,17 @@ class MCPOllamaIntegration:
                 f"The user asked: '{query}'\n\n"
                 f"Here is real-time financial data from Yahoo Finance to help answer this question:\n"
                 f"{formatted_data}\n\n"
-                f"Please incorporate this financial data into your response in a natural way. "
+            )
+            
+            # If we have a template response, add it to the context
+            if template_response:
+                context_prompt += (
+                    f"Please use this exact response format:\n"
+                    f"{template_response}\n\n"
+                )
+            
+            context_prompt += (
+                f"{response_instruction}\n"
                 f"Respond as if you had this real-time financial information available to you."
             )
             
@@ -446,7 +583,14 @@ class MCPOllamaIntegration:
             response = ollama.chat(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant with access to real-time financial data from Yahoo Finance."},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful assistant with access to real-time financial data from Yahoo Finance. "
+                            "When providing financial data, you must use ONLY the exact values provided in the API response. "
+                            "Do not use any other source for financial data."
+                        )
+                    },
                     *self.conversation_history,
                     {"role": "user", "content": context_prompt}
                 ]
