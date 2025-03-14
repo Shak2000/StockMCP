@@ -25,6 +25,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def log_api_request(method: str, url: str, headers: Dict[str, str] = None, params: Dict[str, Any] = None) -> None:
+    """Log API request details."""
+    logger.info(f"\nAPI Request:")
+    logger.info(f"Method: {method}")
+    logger.info(f"URL: {url}")
+    if headers:
+        logger.info(f"Headers: {json.dumps(headers, indent=2)}")
+    if params:
+        logger.info(f"Params: {json.dumps(params, indent=2)}")
+
+def log_api_response(response: requests.Response, error: Exception = None) -> None:
+    """Log API response details."""
+    logger.info(f"\nAPI Response:")
+    if error:
+        logger.error(f"Error: {str(error)}")
+        return
+    
+    logger.info(f"Status Code: {response.status_code}")
+    try:
+        if response.headers.get('content-type', '').startswith('application/json'):
+            logger.info(f"Response JSON: {json.dumps(response.json(), indent=2)}")
+        else:
+            logger.info(f"Response Text: {response.text[:500]}...")  # First 500 chars
+    except Exception as e:
+        logger.error(f"Error parsing response: {str(e)}")
+    logger.info(f"Response Headers: {json.dumps(dict(response.headers), indent=2)}")
+
 class YahooFinanceMCP:
     """
     Model Context Protocol for integrating Yahoo Finance API with LLaMA 3.2 3B.
@@ -169,6 +196,45 @@ class YahooFinanceMCP:
                             }
                         }
                     }
+                },
+                {
+                    # Get a specific field from a stock's information
+                    "name": "get_stock_field",
+                    "description": "Get a specific field from a stock's information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "The stock symbol to look up"
+                            },
+                            "field": {
+                                "type": "string",
+                                "description": "The specific field to retrieve"
+                            }
+                        },
+                        "required": ["symbol", "field"]
+                    }
+                },
+                {
+                    # Get multiple fields from a stock's information
+                    "name": "get_multiple_stock_fields",
+                    "description": "Get multiple fields from a stock's information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "symbol": {
+                                "type": "string",
+                                "description": "The stock symbol to look up"
+                            },
+                            "fields": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of fields to retrieve"
+                            }
+                        },
+                        "required": ["symbol", "fields"]
+                    }
                 }
             ]
         }
@@ -196,6 +262,12 @@ class YahooFinanceMCP:
             
             elif function_name == "get_stock_info":
                 return self.get_stock_info(parameters.get("symbol"))
+                
+            elif function_name == "get_stock_field":
+                return self.get_stock_field(parameters.get("symbol"), parameters.get("field"))
+                
+            elif function_name == "get_multiple_stock_fields":
+                return self.get_multiple_stock_fields(parameters.get("symbol"), parameters.get("fields", []))
             
             elif function_name == "get_stock_history":
                 # Check if we have start_date and end_date for absolute periods
@@ -487,12 +559,239 @@ class YahooFinanceMCP:
                     "longBusinessSummary": info.get("longBusinessSummary", "No business summary available.")
                 }
                 
+                # Also return the raw info data for custom field access
+                result["raw_info"] = info
+                
                 return result
             except Exception as e:
                 logger.error(f"Error fetching info for {symbol}: {str(e)}")
                 return {"error": f"Failed to retrieve company information for {symbol}: {str(e)}"}
         
         return self._get_cached_or_fetch(cache_key, fetch_info, self.INFO_CACHE_TTL)
+    
+    def get_stock_field(self, symbol: str, field: str) -> Dict[str, Any]:
+        """
+        Get a specific field from a stock's information.
+        
+        Args:
+            symbol: The stock symbol to look up
+            field: The specific field to retrieve
+            
+        Returns:
+            The requested field value and metadata
+        """
+        logger.info(f"Getting field '{field}' for {symbol}")
+        
+        # First get all the stock info
+        stock_info = self.get_stock_info(symbol)
+        
+        if "error" in stock_info:
+            return stock_info
+            
+        # Get the raw info data
+        raw_info = stock_info.get("raw_info", {})
+        
+        if not raw_info:
+            return {"error": f"No raw info data available for {symbol}"}
+            
+        # Check if the requested field exists
+        if field not in raw_info:
+            return {"error": f"Field '{field}' not found in data for {symbol}"}
+            
+        # Get the field value
+        field_value = raw_info[field]
+        
+        # Format the response
+        company_name = raw_info.get("shortName", raw_info.get("longName", symbol))
+        
+        # Create a formatted response
+        result = {
+            "symbol": symbol,
+            "field": field,
+            "value": field_value,
+            "company_name": company_name,
+            "field_description": self._get_field_description(field),
+            "llm_response_template": self._format_field_response(company_name, symbol, field, field_value)
+        }
+        
+        return result
+        
+    def get_multiple_stock_fields(self, symbol: str, fields: List[str]) -> Dict[str, Any]:
+        """
+        Get multiple fields from a stock's information.
+        
+        Args:
+            symbol: The stock symbol to look up
+            fields: List of fields to retrieve
+            
+        Returns:
+            The requested field values and metadata
+        """
+        logger.info(f"Getting fields {fields} for {symbol}")
+        
+        # First get all the stock info
+        stock_info = self.get_stock_info(symbol)
+        
+        if "error" in stock_info:
+            return stock_info
+            
+        # Get the raw info data
+        raw_info = stock_info.get("raw_info", {})
+        
+        if not raw_info:
+            return {"error": f"No raw info data available for {symbol}"}
+            
+        # Get the company name
+        company_name = raw_info.get("shortName", raw_info.get("longName", symbol))
+        
+        # Get the field values
+        results = {
+            "symbol": symbol,
+            "company_name": company_name,
+            "fields": []
+        }
+        
+        llm_templates = []
+        
+        for field in fields:
+            if field in raw_info:
+                field_value = raw_info[field]
+                field_data = {
+                    "field": field,
+                    "value": field_value,
+                    "field_description": self._get_field_description(field)
+                }
+                results["fields"].append(field_data)
+                llm_templates.append(self._format_field_response(company_name, symbol, field, field_value))
+            else:
+                field_data = {
+                    "field": field,
+                    "value": "N/A",
+                    "field_description": self._get_field_description(field),
+                    "error": f"Field '{field}' not found in data for {symbol}"
+                }
+                results["fields"].append(field_data)
+                
+        # Add templates for LLM response
+        results["llm_response_template"] = "\n".join(llm_templates)
+        
+        return results
+        
+    def _get_field_description(self, field: str) -> str:
+        """Get a human-readable description for a field."""
+        field_descriptions = {
+            # Company info
+            "shortName": "Short company name",
+            "longName": "Full company name",
+            "sector": "Business sector",
+            "industry": "Industry category",
+            "website": "Company website URL",
+            "address1": "Street address",
+            "city": "City",
+            "state": "State",
+            "zip": "ZIP code",
+            "country": "Country",
+            "phone": "Phone number",
+            "fullTimeEmployees": "Number of full-time employees",
+            "longBusinessSummary": "Business description",
+            
+            # Financial metrics
+            "marketCap": "Market capitalization in USD",
+            "trailingPE": "Trailing price-to-earnings ratio",
+            "forwardPE": "Forward price-to-earnings ratio",
+            "dividendRate": "Annual dividend rate",
+            "dividendYield": "Dividend yield as a percentage",
+            "payoutRatio": "Dividend payout ratio",
+            "beta": "Beta (volatility measure)",
+            "priceToBook": "Price-to-book ratio",
+            "debtToEquity": "Debt-to-equity ratio",
+            "returnOnEquity": "Return on equity",
+            "returnOnAssets": "Return on assets",
+            "revenuePerShare": "Revenue per share",
+            "profitMargins": "Profit margins",
+            "grossMargins": "Gross margins",
+            "operatingMargins": "Operating margins",
+            "totalRevenue": "Total revenue",
+            "totalCash": "Total cash",
+            "totalDebt": "Total debt",
+            "earningsGrowth": "Earnings growth",
+            "revenueGrowth": "Revenue growth",
+            "freeCashflow": "Free cash flow",
+            "operatingCashflow": "Operating cash flow",
+            
+            # Stock price metrics
+            "currentPrice": "Current stock price",
+            "previousClose": "Previous closing price",
+            "open": "Opening price",
+            "dayLow": "Day's low price",
+            "dayHigh": "Day's high price",
+            "fiftyTwoWeekLow": "52-week low price",
+            "fiftyTwoWeekHigh": "52-week high price",
+            "fiftyDayAverage": "50-day moving average",
+            "twoHundredDayAverage": "200-day moving average",
+            "averageVolume": "Average daily volume",
+            "volume": "Current volume",
+            "targetHighPrice": "Highest analyst target price",
+            "targetLowPrice": "Lowest analyst target price",
+            "targetMeanPrice": "Mean analyst target price",
+            "recommendationMean": "Average analyst recommendation (1=Strong Buy, 5=Strong Sell)",
+            "recommendationKey": "Analyst recommendation key",
+            "numberOfAnalystOpinions": "Number of analyst opinions"
+        }
+        
+        return field_descriptions.get(field, f"Value for {field}")
+        
+    def _format_field_response(self, company_name: str, symbol: str, field: str, value: Any) -> str:
+        """Format a field value for LLM response."""
+        field_description = self._get_field_description(field)
+        
+        # Format different types of values appropriately
+        formatted_value = value
+        
+        # Special handling for company officers
+        if field == "companyOfficers" and isinstance(value, list) and len(value) > 0:
+            # Format the company officers data
+            officers_text = []
+            for officer in value[:5]:  # Limit to first 5 officers to avoid too much text
+                name = officer.get("name", "Unknown")
+                title = officer.get("title", "Unknown position")
+                age = officer.get("age", "")
+                age_text = f", {age} years old" if age else ""
+                
+                # Check if we have pay data
+                pay = officer.get("totalPay", 0)
+                pay_text = ""
+                if pay:
+                    pay_text = f", Total compensation: ${pay:,}"
+                    
+                officers_text.append(f"- {name}: {title}{age_text}{pay_text}")
+            
+            formatted_value = "\n" + "\n".join(officers_text)
+            return f"Company Officers for {company_name} ({symbol}):{formatted_value}"
+        
+        # Format numbers
+        if isinstance(value, (int, float)):
+            if field in ["marketCap", "totalCash", "totalDebt", "totalRevenue", "freeCashflow", "operatingCashflow"]:
+                # Format large dollar amounts
+                if value >= 1_000_000_000:
+                    formatted_value = f"${value / 1_000_000_000:.2f} billion"
+                elif value >= 1_000_000:
+                    formatted_value = f"${value / 1_000_000:.2f} million"
+                else:
+                    formatted_value = f"${value:,}"
+            elif field in ["currentPrice", "previousClose", "open", "dayLow", "dayHigh", "fiftyTwoWeekLow", 
+                           "fiftyTwoWeekHigh", "targetHighPrice", "targetLowPrice", "targetMeanPrice"]:
+                # Format prices
+                formatted_value = f"${value:.2f}"
+            elif field in ["dividendYield", "profitMargins", "grossMargins", "operatingMargins", 
+                           "returnOnEquity", "returnOnAssets", "earningsGrowth", "revenueGrowth"]:
+                # Format percentages
+                formatted_value = f"{value * 100:.2f}%" if value < 1 else f"{value:.2f}%"
+        
+        # Create a natural language response
+        response = f"{field_description} for {company_name} ({symbol}): {formatted_value}"
+        
+        return response
     
     def get_stock_history(self, symbol: str, period: str) -> Dict[str, Any]:
         """

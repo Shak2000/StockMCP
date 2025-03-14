@@ -291,6 +291,28 @@ class MCPOllamaIntegration:
         # Remove duplicates while preserving order
         companies = list(dict.fromkeys(companies))
         
+        # First, check for specific field requests
+        fields = self._extract_requested_fields(query_lower)
+        if fields:
+            if len(fields) == 1:
+                return {
+                    "function": "get_stock_field",
+                    "parameters": {
+                        "symbol": companies[0],
+                        "field": fields[0],
+                        "response_instruction": "IMPORTANT: Please use the exact data from the API response's llm_response_template field. Do not use any other source for the information."
+                    }
+                }
+            else:
+                return {
+                    "function": "get_multiple_stock_fields",
+                    "parameters": {
+                        "symbol": companies[0],
+                        "fields": fields,
+                        "response_instruction": "IMPORTANT: Please use the exact data from the API response's llm_response_template field. Do not use any other source for the information."
+                    }
+                }
+        
         # Check for price query patterns
         price_patterns = [
             r"(what( is|'s)|get|show|tell me|how much is) .* (stock |share )?price",
@@ -617,6 +639,134 @@ class MCPOllamaIntegration:
             self.conversation_history.append({"role": "assistant", "content": response['message']['content']})
             
             return response['message']['content']
+
+    def _extract_requested_fields(self, query_lower: str) -> List[str]:
+        """
+        Extract requested fields from a query.
+        
+        Args:
+            query_lower: Lowercase query string
+            
+        Returns:
+            List of requested fields
+        """
+        # Common field names to look for
+        field_patterns = {
+            # Company information
+            "address": "address1",
+            "headquarters": "address1",
+            "location": "address1",
+            "city": "city",
+            "state": "state", 
+            "zip": "zip",
+            "zipcode": "zip",
+            "country": "country",
+            "phone": "phone",
+            "phone number": "phone",
+            "website": "website",
+            "url": "website",
+            "web site": "website",
+            "industry": "industry",
+            "sector": "sector",
+            "business sector": "sector",
+            "employees": "fullTimeEmployees",
+            "full time employees": "fullTimeEmployees",
+            "staff": "fullTimeEmployees",
+            "description": "longBusinessSummary",
+            "business summary": "longBusinessSummary",
+            "business description": "longBusinessSummary",
+            "what they do": "longBusinessSummary",
+            
+            # Financial metrics
+            "market cap": "marketCap",
+            "market capitalization": "marketCap", 
+            "pe ratio": "trailingPE",
+            "p/e ratio": "trailingPE",
+            "price to earnings": "trailingPE",
+            "trailing pe": "trailingPE",
+            "forward pe": "forwardPE",
+            "dividend": "dividendRate",
+            "dividend rate": "dividendRate",
+            "dividend yield": "dividendYield",
+            "yield": "dividendYield",
+            "payout ratio": "payoutRatio",
+            "beta": "beta",
+            "volatility": "beta",
+            "price to book": "priceToBook",
+            "price/book": "priceToBook",
+            "debt to equity": "debtToEquity",
+            "debt/equity": "debtToEquity",
+            "return on equity": "returnOnEquity",
+            "roe": "returnOnEquity",
+            "return on assets": "returnOnAssets",
+            "roa": "returnOnAssets",
+            "revenue per share": "revenuePerShare",
+            "profit margins": "profitMargins",
+            "profit margin": "profitMargins",
+            "gross margins": "grossMargins",
+            "gross margin": "grossMargins",
+            "operating margins": "operatingMargins",
+            "operating margin": "operatingMargins",
+            "revenue": "totalRevenue",
+            "total revenue": "totalRevenue",
+            "cash": "totalCash",
+            "total cash": "totalCash",
+            "debt": "totalDebt",
+            "total debt": "totalDebt",
+            "earnings growth": "earningsGrowth",
+            "revenue growth": "revenueGrowth",
+            "free cash flow": "freeCashflow",
+            "operating cash flow": "operatingCashflow",
+            
+            # Stock price metrics
+            "current price": "currentPrice",
+            "price": "currentPrice",
+            "previous close": "previousClose",
+            "opening price": "open",
+            "open price": "open",
+            "day low": "dayLow",
+            "lowest price today": "dayLow",
+            "day high": "dayHigh",
+            "highest price today": "dayHigh",
+            "52 week low": "fiftyTwoWeekLow",
+            "52-week low": "fiftyTwoWeekLow",
+            "52 week high": "fiftyTwoWeekHigh",
+            "52-week high": "fiftyTwoWeekHigh",
+            "50 day average": "fiftyDayAverage",
+            "50-day moving average": "fiftyDayAverage",
+            "200 day average": "twoHundredDayAverage",
+            "200-day moving average": "twoHundredDayAverage",
+            "volume": "volume",
+            "average volume": "averageVolume",
+            "target price": "targetMeanPrice",
+            "price target": "targetMeanPrice",
+            "analyst price target": "targetMeanPrice",
+            "highest target": "targetHighPrice",
+            "lowest target": "targetLowPrice",
+            "analyst recommendation": "recommendationKey",
+            "analysts": "numberOfAnalystOpinions",
+            "analyst count": "numberOfAnalystOpinions",
+            
+            # Executive information
+            "ceo": "companyOfficers",
+            "executives": "companyOfficers",
+            "officers": "companyOfficers",
+            "management": "companyOfficers"
+        }
+        
+        requested_fields = []
+        
+        # Check for specific field requests
+        for pattern, field in field_patterns.items():
+            if pattern in query_lower:
+                requested_fields.append(field)
+                
+        # Check for specific executive requests
+        if "ceo" in query_lower:
+            requested_fields.append("companyOfficers")
+        
+        # Remove duplicates while preserving order
+        return list(dict.fromkeys(requested_fields))
 
 def run_interactive_session():
     """Run an interactive session with the MCP-enhanced LLaMA model."""
